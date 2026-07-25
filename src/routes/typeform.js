@@ -45,10 +45,42 @@ async function createGHLContact(contactData) {
         }
       }
     );
-    console.log('GHL contact created successfully:', response.data?.contact?.id);
+    console.log('GHL contact created:', response.data?.contact?.id);
     return response.data?.contact;
   } catch (err) {
-    console.error('GHL contact creation error:', err.response?.status, JSON.stringify(err.response?.data));
+    console.error('GHL contact error:', err.response?.status, JSON.stringify(err.response?.data));
+    return null;
+  }
+}
+
+async function createGHLOpportunity(contact, isQualified) {
+  try {
+    const pipelineId = process.env.GHL_PIPELINE_ID;
+    const stageId = process.env.GHL_PIPELINE_STAGE_ID;
+    if (!pipelineId || !stageId || !contact?.id) return;
+
+    const response = await axios.post(
+      'https://services.leadconnectorhq.com/opportunities/',
+      {
+        pipelineId,
+        pipelineStageId: stageId,
+        contactId: contact.id,
+        name: `${contact.firstName || ''} ${contact.lastName || ''}`.trim() || contact.email,
+        locationId: process.env.GHL_LOCATION_ID,
+        status: 'open',
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
+          'Content-Type': 'application/json',
+          'Version': '2021-07-28'
+        }
+      }
+    );
+    console.log('GHL opportunity created:', response.data?.opportunity?.id);
+    return response.data?.opportunity;
+  } catch (err) {
+    console.error('GHL opportunity error:', err.response?.status, JSON.stringify(err.response?.data));
     return null;
   }
 }
@@ -71,7 +103,6 @@ router.post('/webhook', async (req, res) => {
     let hasCalendly = false;
     let bookedUQCalendar = false;
     let isEligibleForGHL = true;
-
     let firstName = '';
     let lastName = '';
     let phone = '';
@@ -137,6 +168,7 @@ router.post('/webhook', async (req, res) => {
       if (titleLower.includes('last name')) lastName = value;
       if (titleLower.includes('how did you hear')) source = value;
 
+      // Qualifying logic
       if (titleLower.includes('invest') || titleLower.includes('£3500') || titleLower.includes('payment plan')) {
         const valueLower = value.toLowerCase();
         if (valueLower.includes('yes') || valueLower.includes('can invest')) {
@@ -144,14 +176,22 @@ router.post('/webhook', async (req, res) => {
         }
       }
 
+      // Credit score check
       if (titleLower.includes('credit score') || titleLower.includes('experian')) {
         creditScore = value;
         const scoreLower = value.toLowerCase();
-        if (scoreLower.includes('800') || scoreLower.includes('701') || scoreLower.includes('600 - 700') || scoreLower.includes('600')) {
+        if (
+          scoreLower.includes('800') ||
+          scoreLower.includes('701') ||
+          scoreLower.includes('700') ||
+          scoreLower.includes('600 - 700') ||
+          scoreLower.includes('600+')
+        ) {
           if (isQualified) isPremiumLead = true;
         }
       }
 
+      // GHL eligibility check
       if (titleLower.includes('permanent resident')) {
         if (value.toLowerCase() === 'no') isEligibleForGHL = false;
       }
@@ -159,6 +199,7 @@ router.post('/webhook', async (req, res) => {
         if (value.toLowerCase().includes('unemployed')) isEligibleForGHL = false;
       }
 
+      // Skip calendar booking URLs
       if (fieldTitle === 'UQ Calendar Booking' || fieldTitle === 'Main Calendar Booking') {
         return;
       }
@@ -172,6 +213,7 @@ router.post('/webhook', async (req, res) => {
       }
     });
 
+    // Add UTM data
     if (hidden && Object.keys(hidden).length > 0) {
       const utmLines = Object.entries(hidden)
         .filter(([k, v]) => v)
@@ -182,6 +224,7 @@ router.post('/webhook', async (req, res) => {
       }
     }
 
+    // Backup Calendly check
     if (!hasCalendly) {
       hasCalendly = discordFields.some(f =>
         f.value && f.value.includes('calendly.com') && f.value.includes('invitees')
@@ -204,14 +247,24 @@ router.post('/webhook', async (req, res) => {
       await sendDiscordMessage(process.env.DISCORD_WEBHOOK_BOOKED_CALLS, embed);
       await sendSlackMessage(process.env.SLACK_WEBHOOK_BOOKED_CALLS, embed);
     } else {
+      // Create GHL contact and opportunity for eligible leads
       if (isEligibleForGHL && (firstName || email || phone)) {
-        await createGHLContact({
-          firstName, lastName, email, phone,
+        const contact = await createGHLContact({
+          firstName,
+          lastName,
+          email,
+          phone,
           locationId: process.env.GHL_LOCATION_ID,
           source: source || 'Typeform',
           tags: ['typeform-lead'],
         });
+
+        // Add to BSM - Call Funnel pipeline
+        if (contact) {
+          await createGHLOpportunity(contact, isQualified);
+        }
       }
+
       const embed = createEmbed('New Lead Optin', discordFields, COLORS.BLUE);
       await sendDiscordMessage(process.env.DISCORD_WEBHOOK_NEW_LEADS, embed);
       await sendSlackMessage(process.env.SLACK_WEBHOOK_NEW_LEADS, embed);
