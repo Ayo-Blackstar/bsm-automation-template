@@ -51,6 +51,11 @@ function abbreviateTitle(title) {
   return title;
 }
 
+function isUQCalendarUrl(url) {
+  const lower = url.toLowerCase();
+  return lower.includes('uq') || lower.includes('uq-career-coaching');
+}
+
 async function createGHLContact(contactData) {
   try {
     const response = await axios.post(
@@ -72,22 +77,20 @@ async function createGHLContact(contactData) {
   }
 }
 
-async function createGHLOpportunity(contact, isPremium, isQualified) {
+async function createGHLOpportunity(contact, stageId, monetaryValue, source) {
   try {
     const pipelineId = process.env.GHL_PIPELINE_ID;
-    const stageId = process.env.GHL_PIPELINE_STAGE_ID;
-    if (!pipelineId || !stageId || !contact?.id) return;
+    if (!pipelineId || !stageId || !contact?.id) return null;
 
-    const monetaryValue = isPremium ? 3500 : 1997;
-    const source = isQualified ? 'qualified' : 'unqualified';
+    const name = `${contact.firstName || ''} ${contact.lastName || ''}`.trim() || contact.email;
 
-    await axios.post(
+    const response = await axios.post(
       'https://services.leadconnectorhq.com/opportunities/',
       {
         pipelineId,
         pipelineStageId: stageId,
         contactId: contact.id,
-        name: `${contact.firstName || ''} ${contact.lastName || ''}`.trim() || contact.email,
+        name,
         locationId: process.env.GHL_LOCATION_ID,
         status: 'open',
         monetaryValue,
@@ -101,15 +104,31 @@ async function createGHLOpportunity(contact, isPremium, isQualified) {
         }
       }
     );
-    console.log('GHL opportunity created successfully');
+    console.log('GHL opportunity created:', response.data?.opportunity?.id);
+    return response.data?.opportunity;
   } catch (err) {
     console.error('GHL opportunity error:', err.response?.status, JSON.stringify(err.response?.data));
+    return null;
   }
 }
 
-function isUQCalendarUrl(url) {
-  const lower = url.toLowerCase();
-  return lower.includes('uq') || lower.includes('uq-career-coaching');
+async function updateGHLOpportunity(opportunityId, stageId) {
+  try {
+    await axios.put(
+      `https://services.leadconnectorhq.com/opportunities/${opportunityId}`,
+      { pipelineStageId: stageId },
+      {
+        headers: {
+          'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
+          'Content-Type': 'application/json',
+          'Version': '2021-07-28'
+        }
+      }
+    );
+    console.log('GHL opportunity updated to booked stage');
+  } catch (err) {
+    console.error('GHL opportunity update error:', err.response?.status, JSON.stringify(err.response?.data));
+  }
 }
 
 router.post('/webhook', async (req, res) => {
@@ -130,7 +149,6 @@ router.post('/webhook', async (req, res) => {
     let phone = '';
     let email = '';
     let source = '';
-    let creditScore = '';
 
     const now = new Date().toLocaleDateString('en-GB');
     discordFields.push({ name: 'Time', value: now, inline: true });
@@ -200,7 +218,6 @@ router.post('/webhook', async (req, res) => {
 
       // Credit score check
       if (titleLower.includes('credit score') || titleLower.includes('experian')) {
-        creditScore = value;
         const scoreLower = value.toLowerCase();
         if (
           scoreLower.includes('800') ||
@@ -253,7 +270,31 @@ router.post('/webhook', async (req, res) => {
       );
     }
 
+    const monetaryValue = isPremiumLead ? 3500 : isQualified ? 1997 : 0;
+    const opportunitySource = isPremiumLead ? 'premium-qualified' : isQualified ? 'qualified' : 'unqualified';
+
     if (hasCalendly) {
+      // Call booked - create/update GHL opportunity to Appointment Booked stage
+      if (isEligibleForGHL && (firstName || email || phone)) {
+        const contact = await createGHLContact({
+          firstName,
+          lastName,
+          email,
+          phone,
+          locationId: process.env.GHL_LOCATION_ID,
+          source: source || 'typeform',
+          tags: ['typeform-lead', 'appointment-booked'],
+        });
+        if (contact) {
+          await createGHLOpportunity(
+            contact,
+            process.env.GHL_PIPELINE_BOOKED_STAGE_ID,
+            monetaryValue,
+            opportunitySource
+          );
+        }
+      }
+
       let color, title;
       if (isPremiumLead && !bookedUQCalendar) {
         color = COLORS.GOLD;
@@ -268,7 +309,9 @@ router.post('/webhook', async (req, res) => {
       const embed = createEmbed(title, discordFields, color);
       await sendDiscordMessage(process.env.DISCORD_WEBHOOK_BOOKED_CALLS, embed);
       await sendSlackMessage(process.env.SLACK_WEBHOOK_BOOKED_CALLS, embed);
+
     } else {
+      // New lead - create GHL contact and opportunity in Submitted Application
       if (!isDuplicateEmail(email)) {
         if (isEligibleForGHL && (firstName || email || phone)) {
           const contact = await createGHLContact({
@@ -281,7 +324,12 @@ router.post('/webhook', async (req, res) => {
             tags: ['typeform-lead'],
           });
           if (contact) {
-            await createGHLOpportunity(contact, isPremiumLead, isQualified);
+            await createGHLOpportunity(
+              contact,
+              process.env.GHL_PIPELINE_STAGE_ID,
+              monetaryValue,
+              opportunitySource
+            );
           }
         }
 
