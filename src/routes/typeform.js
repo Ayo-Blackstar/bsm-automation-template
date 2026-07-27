@@ -4,7 +4,6 @@ const { sendDiscordMessage, createEmbed, COLORS } = require('../utils/discord');
 const { sendSlackMessage } = require('../utils/slack');
 const axios = require('axios');
 
-// Email deduplication - 5 minutes
 const processedEmails = new Map();
 const DEDUP_WINDOW_MS = 5 * 60 * 1000;
 
@@ -73,15 +72,14 @@ async function createGHLContact(contactData) {
   }
 }
 
-async function createGHLOpportunity(contact, isPremium) {
+async function createGHLOpportunity(contact, isPremium, isQualified) {
   try {
     const pipelineId = process.env.GHL_PIPELINE_ID;
     const stageId = process.env.GHL_PIPELINE_STAGE_ID;
     if (!pipelineId || !stageId || !contact?.id) return;
 
-    const name = `${contact.firstName || ''} ${contact.lastName || ''}`.trim() || contact.email;
     const monetaryValue = isPremium ? 3500 : 1997;
-    const source = isPremium ? 'Finance' : 'UQ';
+    const source = isQualified ? 'qualified' : 'unqualified';
 
     await axios.post(
       'https://services.leadconnectorhq.com/opportunities/',
@@ -89,7 +87,7 @@ async function createGHLOpportunity(contact, isPremium) {
         pipelineId,
         pipelineStageId: stageId,
         contactId: contact.id,
-        name,
+        name: `${contact.firstName || ''} ${contact.lastName || ''}`.trim() || contact.email,
         locationId: process.env.GHL_LOCATION_ID,
         status: 'open',
         monetaryValue,
@@ -127,7 +125,6 @@ router.post('/webhook', async (req, res) => {
     let hasCalendly = false;
     let bookedUQCalendar = false;
     let isEligibleForGHL = true;
-
     let firstName = '';
     let lastName = '';
     let phone = '';
@@ -216,6 +213,89 @@ router.post('/webhook', async (req, res) => {
         }
       }
 
-      // GHL eligibility check
+      // GHL eligibility
       if (titleLower.includes('permanent resident')) {
-        if (value.toLowerCase() === 'no') isEligibleForGHL =
+        if (value.toLowerCase() === 'no') isEligibleForGHL = false;
+      }
+      if (titleLower.includes('earning') || titleLower.includes('income')) {
+        if (value.toLowerCase().includes('unemployed')) isEligibleForGHL = false;
+      }
+
+      // Skip calendar booking URLs
+      if (fieldTitle === 'UQ Calendar Booking' || fieldTitle === 'Main Calendar Booking') {
+        return;
+      }
+
+      if (value) {
+        discordFields.push({
+          name: fieldTitle.substring(0, 256),
+          value: String(value).substring(0, 1024),
+          inline: true
+        });
+      }
+    });
+
+    // Add UTM data
+    if (hidden && Object.keys(hidden).length > 0) {
+      const utmLines = Object.entries(hidden)
+        .filter(([k, v]) => v)
+        .map(([k, v]) => `**${k}:** ${v}`)
+        .join('\n');
+      if (utmLines) {
+        discordFields.push({ name: 'ATTRIBUTION', value: utmLines, inline: false });
+      }
+    }
+
+    // Backup Calendly check
+    if (!hasCalendly) {
+      hasCalendly = discordFields.some(f =>
+        f.value && f.value.includes('calendly.com') && f.value.includes('invitees')
+      );
+    }
+
+    if (hasCalendly) {
+      let color, title;
+      if (isPremiumLead && !bookedUQCalendar) {
+        color = COLORS.GOLD;
+        title = '🥇 New Call Booked - PREMIUM QUALIFIED';
+      } else if (isQualified) {
+        color = COLORS.GREEN;
+        title = '📞 New Call Booked - QUALIFIED';
+      } else {
+        color = COLORS.BLUE;
+        title = '📞 New Call Booked - UNQUALIFIED';
+      }
+      const embed = createEmbed(title, discordFields, color);
+      await sendDiscordMessage(process.env.DISCORD_WEBHOOK_BOOKED_CALLS, embed);
+      await sendSlackMessage(process.env.SLACK_WEBHOOK_BOOKED_CALLS, embed);
+    } else {
+      if (!isDuplicateEmail(email)) {
+        if (isEligibleForGHL && (firstName || email || phone)) {
+          const contact = await createGHLContact({
+            firstName,
+            lastName,
+            email,
+            phone,
+            locationId: process.env.GHL_LOCATION_ID,
+            source: source || 'typeform',
+            tags: ['typeform-lead'],
+          });
+          if (contact) {
+            await createGHLOpportunity(contact, isPremiumLead, isQualified);
+          }
+        }
+
+        const embed = createEmbed('New Lead Optin', discordFields, COLORS.BLUE);
+        await sendDiscordMessage(process.env.DISCORD_WEBHOOK_NEW_LEADS, embed);
+        await sendSlackMessage(process.env.SLACK_WEBHOOK_NEW_LEADS, embed);
+      }
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Typeform webhook error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+module.exports = router;
