@@ -72,6 +72,11 @@ async function createGHLContact(contactData) {
     console.log('GHL contact created:', response.data?.contact?.id);
     return response.data?.contact;
   } catch (err) {
+    // If duplicate contact, return existing contact ID
+    if (err.response?.status === 400 && err.response?.data?.meta?.contactId) {
+      console.log('GHL contact already exists:', err.response.data.meta.contactId);
+      return { id: err.response.data.meta.contactId };
+    }
     console.error('GHL contact error:', err.response?.status, JSON.stringify(err.response?.data));
     return null;
   }
@@ -82,7 +87,7 @@ async function createGHLOpportunity(contact, stageId, monetaryValue, source) {
     const pipelineId = process.env.GHL_PIPELINE_ID;
     if (!pipelineId || !stageId || !contact?.id) return null;
 
-    const name = `${contact.firstName || ''} ${contact.lastName || ''}`.trim() || contact.email;
+    const name = `${contact.firstName || ''} ${contact.lastName || ''}`.trim() || contact.email || 'New Lead';
 
     const response = await axios.post(
       'https://services.leadconnectorhq.com/opportunities/',
@@ -112,22 +117,43 @@ async function createGHLOpportunity(contact, stageId, monetaryValue, source) {
   }
 }
 
-async function updateGHLOpportunity(opportunityId, stageId) {
+async function findAndUpdateOpportunityStage(contactId, stageId) {
   try {
-    await axios.put(
-      `https://services.leadconnectorhq.com/opportunities/${opportunityId}`,
-      { pipelineStageId: stageId },
+    const pipelineId = process.env.GHL_PIPELINE_ID;
+    if (!pipelineId || !stageId || !contactId) return null;
+
+    const response = await axios.get(
+      `https://services.leadconnectorhq.com/opportunities/search?location_id=${process.env.GHL_LOCATION_ID}&contact_id=${contactId}`,
       {
         headers: {
           'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
-          'Content-Type': 'application/json',
           'Version': '2021-07-28'
         }
       }
     );
-    console.log('GHL opportunity updated to booked stage');
+
+    const opportunities = response.data?.opportunities || [];
+    const opportunity = opportunities.find(o => o.pipelineId === pipelineId);
+
+    if (opportunity) {
+      await axios.put(
+        `https://services.leadconnectorhq.com/opportunities/${opportunity.id}`,
+        { pipelineStageId: stageId },
+        {
+          headers: {
+            'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
+            'Content-Type': 'application/json',
+            'Version': '2021-07-28'
+          }
+        }
+      );
+      console.log('GHL opportunity stage updated to booked');
+      return opportunity;
+    }
+    return null;
   } catch (err) {
     console.error('GHL opportunity update error:', err.response?.status, JSON.stringify(err.response?.data));
+    return null;
   }
 }
 
@@ -208,7 +234,6 @@ router.post('/webhook', async (req, res) => {
       if (titleLower.includes('last name')) lastName = value;
       if (titleLower.includes('how did you hear')) source = value;
 
-      // Qualifying logic
       if (titleLower.includes('invest') || titleLower.includes('£3500') || titleLower.includes('payment plan')) {
         const valueLower = value.toLowerCase();
         if (valueLower.includes('yes') || valueLower.includes('can invest')) {
@@ -216,7 +241,6 @@ router.post('/webhook', async (req, res) => {
         }
       }
 
-      // Credit score check
       if (titleLower.includes('credit score') || titleLower.includes('experian')) {
         const scoreLower = value.toLowerCase();
         if (
@@ -230,7 +254,6 @@ router.post('/webhook', async (req, res) => {
         }
       }
 
-      // GHL eligibility
       if (titleLower.includes('permanent resident')) {
         if (value.toLowerCase() === 'no') isEligibleForGHL = false;
       }
@@ -238,7 +261,6 @@ router.post('/webhook', async (req, res) => {
         if (value.toLowerCase().includes('unemployed')) isEligibleForGHL = false;
       }
 
-      // Skip calendar booking URLs
       if (fieldTitle === 'UQ Calendar Booking' || fieldTitle === 'Main Calendar Booking') {
         return;
       }
@@ -252,7 +274,6 @@ router.post('/webhook', async (req, res) => {
       }
     });
 
-    // Add UTM data
     if (hidden && Object.keys(hidden).length > 0) {
       const utmLines = Object.entries(hidden)
         .filter(([k, v]) => v)
@@ -263,7 +284,6 @@ router.post('/webhook', async (req, res) => {
       }
     }
 
-    // Backup Calendly check
     if (!hasCalendly) {
       hasCalendly = discordFields.some(f =>
         f.value && f.value.includes('calendly.com') && f.value.includes('invitees')
@@ -274,9 +294,10 @@ router.post('/webhook', async (req, res) => {
     const opportunitySource = isPremiumLead ? 'premium-qualified' : isQualified ? 'qualified' : 'unqualified';
 
     if (hasCalendly) {
-      // Call booked - create/update GHL opportunity to Appointment Booked stage
+      // Create or find contact
+      let contact = null;
       if (isEligibleForGHL && (firstName || email || phone)) {
-        const contact = await createGHLContact({
+        contact = await createGHLContact({
           firstName,
           lastName,
           email,
@@ -285,13 +306,22 @@ router.post('/webhook', async (req, res) => {
           source: source || 'typeform',
           tags: ['typeform-lead', 'appointment-booked'],
         });
-        if (contact) {
-          await createGHLOpportunity(
-            contact,
-            process.env.GHL_PIPELINE_BOOKED_STAGE_ID,
-            monetaryValue,
-            opportunitySource
+
+        if (contact?.id) {
+          // Try to update existing opportunity stage first
+          const existing = await findAndUpdateOpportunityStage(
+            contact.id,
+            process.env.GHL_PIPELINE_BOOKED_STAGE_ID
           );
+          // If no existing opportunity, create one
+          if (!existing) {
+            await createGHLOpportunity(
+              contact,
+              process.env.GHL_PIPELINE_BOOKED_STAGE_ID,
+              monetaryValue,
+              opportunitySource
+            );
+          }
         }
       }
 
@@ -311,7 +341,6 @@ router.post('/webhook', async (req, res) => {
       await sendSlackMessage(process.env.SLACK_WEBHOOK_BOOKED_CALLS, embed);
 
     } else {
-      // New lead - create GHL contact and opportunity in Submitted Application
       if (!isDuplicateEmail(email)) {
         if (isEligibleForGHL && (firstName || email || phone)) {
           const contact = await createGHLContact({
@@ -323,7 +352,7 @@ router.post('/webhook', async (req, res) => {
             source: source || 'typeform',
             tags: ['typeform-lead'],
           });
-          if (contact) {
+          if (contact?.id) {
             await createGHLOpportunity(
               contact,
               process.env.GHL_PIPELINE_STAGE_ID,
