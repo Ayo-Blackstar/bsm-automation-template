@@ -4,7 +4,6 @@ const { sendDiscordMessage, createEmbed, COLORS } = require('../utils/discord');
 const { sendSlackMessage } = require('../utils/slack');
 const { google } = require('googleapis');
 
-// Deduplication cache - 24 hours
 const recentNotifications = new Map();
 const DEDUP_WINDOW_MS = 24 * 60 * 60 * 1000;
 
@@ -37,7 +36,7 @@ async function getSheets() {
 
 function getContactGHLLink(contactId) {
   const locationId = process.env.GHL_LOCATION_ID;
-  return `https://app.gohighlevel.com/location/${locationId}/contacts/detail/${contactId}`;
+  return `https://app.gohighlevel.com/v2/location/${locationId}/contacts/detail/${contactId}`;
 }
 
 function determineLeadColor(body) {
