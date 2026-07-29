@@ -72,7 +72,6 @@ async function createGHLContact(contactData) {
     console.log('GHL contact created:', response.data?.contact?.id);
     return response.data?.contact;
   } catch (err) {
-    // If duplicate contact, return existing contact ID
     if (err.response?.status === 400 && err.response?.data?.meta?.contactId) {
       console.log('GHL contact already exists:', err.response.data.meta.contactId);
       return { id: err.response.data.meta.contactId };
@@ -169,7 +168,6 @@ router.post('/webhook', async (req, res) => {
     let isPremiumLead = false;
     let hasCalendly = false;
     let bookedUQCalendar = false;
-    let isEligibleForGHL = true;
     let firstName = '';
     let lastName = '';
     let phone = '';
@@ -254,13 +252,6 @@ router.post('/webhook', async (req, res) => {
         }
       }
 
-      if (titleLower.includes('permanent resident')) {
-        if (value.toLowerCase() === 'no') isEligibleForGHL = false;
-      }
-      if (titleLower.includes('earning') || titleLower.includes('income')) {
-        if (value.toLowerCase().includes('unemployed')) isEligibleForGHL = false;
-      }
-
       if (fieldTitle === 'UQ Calendar Booking' || fieldTitle === 'Main Calendar Booking') {
         return;
       }
@@ -293,35 +284,30 @@ router.post('/webhook', async (req, res) => {
     const monetaryValue = isPremiumLead ? 3500 : isQualified ? 1997 : 0;
     const opportunitySource = isPremiumLead ? 'premium-qualified' : isQualified ? 'qualified' : 'unqualified';
 
-    if (hasCalendly) {
-      // Create or find contact
-      let contact = null;
-      if (isEligibleForGHL && (firstName || email || phone)) {
-        contact = await createGHLContact({
-          firstName,
-          lastName,
-          email,
-          phone,
-          locationId: process.env.GHL_LOCATION_ID,
-          source: source || 'typeform',
-          tags: ['typeform-lead', 'appointment-booked'],
-        });
+    // Always create GHL contact for ALL leads
+    const contact = await createGHLContact({
+      firstName,
+      lastName,
+      email,
+      phone,
+      locationId: process.env.GHL_LOCATION_ID,
+      source: source || 'typeform',
+      tags: ['typeform-lead'],
+    });
 
-        if (contact?.id) {
-          // Try to update existing opportunity stage first
-          const existing = await findAndUpdateOpportunityStage(
-            contact.id,
-            process.env.GHL_PIPELINE_BOOKED_STAGE_ID
+    if (hasCalendly) {
+      if (contact?.id) {
+        const existing = await findAndUpdateOpportunityStage(
+          contact.id,
+          process.env.GHL_PIPELINE_BOOKED_STAGE_ID
+        );
+        if (!existing) {
+          await createGHLOpportunity(
+            contact,
+            process.env.GHL_PIPELINE_BOOKED_STAGE_ID,
+            monetaryValue,
+            opportunitySource
           );
-          // If no existing opportunity, create one
-          if (!existing) {
-            await createGHLOpportunity(
-              contact,
-              process.env.GHL_PIPELINE_BOOKED_STAGE_ID,
-              monetaryValue,
-              opportunitySource
-            );
-          }
         }
       }
 
@@ -341,26 +327,13 @@ router.post('/webhook', async (req, res) => {
       await sendSlackMessage(process.env.SLACK_WEBHOOK_BOOKED_CALLS, embed);
 
     } else {
-      if (!isDuplicateEmail(email)) {
-        if (isEligibleForGHL && (firstName || email || phone)) {
-          const contact = await createGHLContact({
-            firstName,
-            lastName,
-            email,
-            phone,
-            locationId: process.env.GHL_LOCATION_ID,
-            source: source || 'typeform',
-            tags: ['typeform-lead'],
-          });
-          if (contact?.id) {
-            await createGHLOpportunity(
-              contact,
-              process.env.GHL_PIPELINE_STAGE_ID,
-              monetaryValue,
-              opportunitySource
-            );
-          }
-        }
+      if (!isDuplicateEmail(email) && contact?.id) {
+        await createGHLOpportunity(
+          contact,
+          process.env.GHL_PIPELINE_STAGE_ID,
+          monetaryValue,
+          opportunitySource
+        );
 
         const embed = createEmbed('New Lead Optin', discordFields, COLORS.BLUE);
         await sendDiscordMessage(process.env.DISCORD_WEBHOOK_NEW_LEADS, embed);
