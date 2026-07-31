@@ -252,7 +252,15 @@ router.post('/webhook', async (req, res) => {
         }
       }
 
+      // Show booking link in Discord but skip from regular fields
       if (fieldTitle === 'UQ Calendar Booking' || fieldTitle === 'Main Calendar Booking') {
+        if (value && value.includes('calendly.com')) {
+          discordFields.push({
+            name: 'Call Booking',
+            value: String(value).substring(0, 1024),
+            inline: true
+          });
+        }
         return;
       }
 
