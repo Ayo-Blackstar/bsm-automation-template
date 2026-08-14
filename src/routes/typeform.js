@@ -233,19 +233,17 @@ router.post('/webhook', async (req, res) => {
       if (titleLower.includes('last name')) lastName = value;
       if (titleLower.includes('how did you hear')) source = value;
 
-      // Income check — £35k+ = high income
+      // Income check — £35k+ = high income (PREMIUM QUALIFIED)
       if (titleLower.includes('earning per year') || titleLower.includes('currently earning')) {
         const valueLower = value.toLowerCase();
         if (
-          valueLower.includes('£35k') ||
-          valueLower.includes('£45k') ||
-          valueLower.includes('£60k') ||
-          valueLower.includes('over £60') ||
           valueLower.includes('35k') ||
           valueLower.includes('45k') ||
           valueLower.includes('60k') ||
-          valueLower.includes('35k–45k') ||
-          valueLower.includes('45k–60k')
+          valueLower.includes('over') ||
+          valueLower.includes('£35') ||
+          valueLower.includes('£45') ||
+          valueLower.includes('£60')
         ) {
           hasHighIncome = true;
         }
@@ -311,10 +309,10 @@ router.post('/webhook', async (req, res) => {
     }
 
     // Colour coding:
-    // Gold (PREMIUM QUALIFIED) = investment yes + credit 600+ + income £35k+
-    // Green (QUALIFIED) = investment yes + credit 600+ (any income)
-    // Blue (UNQUALIFIED) = no investment or poor credit
-    const isPremiumQualified = isPremiumLead && hasHighIncome && !bookedUQCalendar;
+    // 🥇 PREMIUM QUALIFIED = income £35k+ OR (investment yes + credit 600+) and not UQ calendar
+    // 🟢 QUALIFIED = investment yes + credit 600+ (any income)
+    // 📞 UNQUALIFIED = everything else
+    const isPremiumQualified = (hasHighIncome || isPremiumLead) && !bookedUQCalendar;
     const monetaryValue = isPremiumQualified ? 3500 : isQualified ? 1997 : 0;
     const opportunitySource = isPremiumQualified ? 'premium-qualified' : isQualified ? 'qualified' : 'unqualified';
 
