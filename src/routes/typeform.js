@@ -166,6 +166,7 @@ router.post('/webhook', async (req, res) => {
     const discordFields = [];
     let isQualified = false;
     let isPremiumLead = false;
+    let hasHighIncome = false;
     let hasCalendly = false;
     let bookedUQCalendar = false;
     let firstName = '';
@@ -232,6 +233,25 @@ router.post('/webhook', async (req, res) => {
       if (titleLower.includes('last name')) lastName = value;
       if (titleLower.includes('how did you hear')) source = value;
 
+      // Income check — £35k+ = high income
+      if (titleLower.includes('earning per year') || titleLower.includes('currently earning')) {
+        const valueLower = value.toLowerCase();
+        if (
+          valueLower.includes('£35k') ||
+          valueLower.includes('£45k') ||
+          valueLower.includes('£60k') ||
+          valueLower.includes('over £60') ||
+          valueLower.includes('35k') ||
+          valueLower.includes('45k') ||
+          valueLower.includes('60k') ||
+          valueLower.includes('35k–45k') ||
+          valueLower.includes('45k–60k')
+        ) {
+          hasHighIncome = true;
+        }
+      }
+
+      // Investment check
       if (titleLower.includes('invest') || titleLower.includes('£3500') || titleLower.includes('payment plan')) {
         const valueLower = value.toLowerCase();
         if (valueLower.includes('yes') || valueLower.includes('can invest')) {
@@ -239,6 +259,7 @@ router.post('/webhook', async (req, res) => {
         }
       }
 
+      // Credit score check
       if (titleLower.includes('credit score') || titleLower.includes('experian')) {
         const scoreLower = value.toLowerCase();
         if (
@@ -252,7 +273,7 @@ router.post('/webhook', async (req, res) => {
         }
       }
 
-      // Show booking link in Discord but skip from regular fields
+      // Show booking link in Discord
       if (fieldTitle === 'UQ Calendar Booking' || fieldTitle === 'Main Calendar Booking') {
         if (value && value.includes('calendly.com')) {
           discordFields.push({
@@ -289,8 +310,13 @@ router.post('/webhook', async (req, res) => {
       );
     }
 
-    const monetaryValue = isPremiumLead ? 3500 : isQualified ? 1997 : 0;
-    const opportunitySource = isPremiumLead ? 'premium-qualified' : isQualified ? 'qualified' : 'unqualified';
+    // Colour coding:
+    // Gold (PREMIUM QUALIFIED) = investment yes + credit 600+ + income £35k+
+    // Green (QUALIFIED) = investment yes + credit 600+ (any income)
+    // Blue (UNQUALIFIED) = no investment or poor credit
+    const isPremiumQualified = isPremiumLead && hasHighIncome && !bookedUQCalendar;
+    const monetaryValue = isPremiumQualified ? 3500 : isQualified ? 1997 : 0;
+    const opportunitySource = isPremiumQualified ? 'premium-qualified' : isQualified ? 'qualified' : 'unqualified';
 
     // Always create GHL contact for ALL leads
     const contact = await createGHLContact({
@@ -320,16 +346,17 @@ router.post('/webhook', async (req, res) => {
       }
 
       let color, title;
-      if (isPremiumLead && !bookedUQCalendar) {
+      if (isPremiumQualified) {
         color = COLORS.GOLD;
         title = '🥇 New Call Booked - PREMIUM QUALIFIED';
       } else if (isQualified) {
         color = COLORS.GREEN;
-        title = '📞 New Call Booked - QUALIFIED';
+        title = '🟢 New Call Booked - QUALIFIED';
       } else {
         color = COLORS.BLUE;
         title = '📞 New Call Booked - UNQUALIFIED';
       }
+
       const embed = createEmbed(title, discordFields, color);
       await sendDiscordMessage(process.env.DISCORD_WEBHOOK_BOOKED_CALLS, embed);
       await sendSlackMessage(process.env.SLACK_WEBHOOK_BOOKED_CALLS, embed);
@@ -343,7 +370,19 @@ router.post('/webhook', async (req, res) => {
           opportunitySource
         );
 
-        const embed = createEmbed('New Lead Optin', discordFields, COLORS.BLUE);
+        let color, title;
+        if (isPremiumQualified) {
+          color = COLORS.GOLD;
+          title = '🥇 New Lead Optin - PREMIUM QUALIFIED';
+        } else if (isQualified) {
+          color = COLORS.GREEN;
+          title = '🟢 New Lead Optin - QUALIFIED';
+        } else {
+          color = COLORS.BLUE;
+          title = '📞 New Lead Optin - UNQUALIFIED';
+        }
+
+        const embed = createEmbed(title, discordFields, color);
         await sendDiscordMessage(process.env.DISCORD_WEBHOOK_NEW_LEADS, embed);
         await sendSlackMessage(process.env.SLACK_WEBHOOK_NEW_LEADS, embed);
       }
