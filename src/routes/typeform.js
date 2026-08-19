@@ -5,7 +5,7 @@ const { sendSlackMessage } = require('../utils/slack');
 const axios = require('axios');
 
 const processedEmails = new Map();
-const DEDUP_WINDOW_MS = 5 * 60 * 1000;
+const DEDUP_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
 
 function isDuplicateEmail(email) {
   if (!email) return false;
@@ -233,7 +233,7 @@ router.post('/webhook', async (req, res) => {
       if (titleLower.includes('last name')) lastName = value;
       if (titleLower.includes('how did you hear')) source = value;
 
-      // Income check — £35k+ = high income (PREMIUM QUALIFIED)
+      // Income check — £35k+ triggers PREMIUM QUALIFIED immediately
       if (titleLower.includes('earning per year') || titleLower.includes('currently earning')) {
         const valueLower = value.toLowerCase();
         if (
@@ -292,6 +292,7 @@ router.post('/webhook', async (req, res) => {
       }
     });
 
+    // Add UTM data
     if (hidden && Object.keys(hidden).length > 0) {
       const utmLines = Object.entries(hidden)
         .filter(([k, v]) => v)
@@ -309,9 +310,9 @@ router.post('/webhook', async (req, res) => {
     }
 
     // Colour coding:
-    // 🥇 PREMIUM QUALIFIED = income £35k+ OR (investment yes + credit 600+) and not UQ calendar
-    // 🟢 QUALIFIED = investment yes + credit 600+ (any income)
-    // 📞 UNQUALIFIED = everything else
+    // PREMIUM QUALIFIED = income £35k+ OR (investment yes + credit 600+) — NOT UQ calendar
+    // QUALIFIED = investment yes + credit 600+
+    // UNQUALIFIED = everything else
     const isPremiumQualified = (hasHighIncome || isPremiumLead) && !bookedUQCalendar;
     const monetaryValue = isPremiumQualified ? 3500 : isQualified ? 1997 : 0;
     const opportunitySource = isPremiumQualified ? 'premium-qualified' : isQualified ? 'qualified' : 'unqualified';
@@ -328,6 +329,7 @@ router.post('/webhook', async (req, res) => {
     });
 
     if (hasCalendly) {
+      // Full form with booking — move opportunity
       if (contact?.id) {
         const existing = await findAndUpdateOpportunityStage(
           contact.id,
@@ -343,6 +345,7 @@ router.post('/webhook', async (req, res) => {
         }
       }
 
+      // Always send call booked regardless of dedup
       let color, title;
       if (isPremiumQualified) {
         color = COLORS.GOLD;
@@ -354,19 +357,26 @@ router.post('/webhook', async (req, res) => {
         color = COLORS.BLUE;
         title = '📞 New Call Booked - UNQUALIFIED';
       }
-
       const embed = createEmbed(title, discordFields, color);
       await sendDiscordMessage(process.env.DISCORD_WEBHOOK_BOOKED_CALLS, embed);
       await sendSlackMessage(process.env.SLACK_WEBHOOK_BOOKED_CALLS, embed);
 
     } else {
-      if (!isDuplicateEmail(email) && contact?.id) {
-        await createGHLOpportunity(
-          contact,
-          process.env.GHL_PIPELINE_STAGE_ID,
-          monetaryValue,
-          opportunitySource
-        );
+      // Partial submission — send new lead
+      // Key fix: always send if hasHighIncome (over £35k) even without investment answer
+      // Use dedup to prevent spam but NOT to block qualified leads
+      const isPartialQualified = hasHighIncome || isQualified || isPremiumQualified;
+
+      if (!isDuplicateEmail(email)) {
+        // Create opportunity for ALL leads
+        if (contact?.id) {
+          await createGHLOpportunity(
+            contact,
+            process.env.GHL_PIPELINE_STAGE_ID,
+            monetaryValue,
+            opportunitySource
+          );
+        }
 
         let color, title;
         if (isPremiumQualified) {
@@ -375,6 +385,10 @@ router.post('/webhook', async (req, res) => {
         } else if (isQualified) {
           color = COLORS.GREEN;
           title = '🟢 New Lead Optin - QUALIFIED';
+        } else if (hasHighIncome) {
+          // Partial — income over £35k but no investment answer yet
+          color = COLORS.GOLD;
+          title = '🥇 New Lead Optin - PREMIUM QUALIFIED';
         } else {
           color = COLORS.BLUE;
           title = '📞 New Lead Optin - UNQUALIFIED';
