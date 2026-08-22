@@ -5,7 +5,7 @@ const { sendSlackMessage } = require('../utils/slack');
 const axios = require('axios');
 
 const processedEmails = new Map();
-const DEDUP_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+const DEDUP_WINDOW_MS = 10 * 60 * 1000;
 
 function isDuplicateEmail(email) {
   if (!email) return false;
@@ -56,6 +56,10 @@ function isUQCalendarUrl(url) {
   return lower.includes('uq') || lower.includes('uq-career-coaching');
 }
 
+function getContactGHLLink(contactId) {
+  return `https://app.gohighlevel.com/v2/location/${process.env.GHL_LOCATION_ID}/contacts/detail/${contactId}`;
+}
+
 async function createGHLContact(contactData) {
   try {
     const response = await axios.post(
@@ -78,6 +82,25 @@ async function createGHLContact(contactData) {
     }
     console.error('GHL contact error:', err.response?.status, JSON.stringify(err.response?.data));
     return null;
+  }
+}
+
+async function updateGHLContactTags(contactId, tags) {
+  try {
+    await axios.put(
+      `https://services.leadconnectorhq.com/contacts/${contactId}`,
+      { tags },
+      {
+        headers: {
+          'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
+          'Content-Type': 'application/json',
+          'Version': '2021-07-28'
+        }
+      }
+    );
+    console.log('GHL contact tags updated:', tags);
+  } catch (err) {
+    console.error('GHL tag update error:', err.response?.status, JSON.stringify(err.response?.data));
   }
 }
 
@@ -174,6 +197,7 @@ router.post('/webhook', async (req, res) => {
     let phone = '';
     let email = '';
     let source = '';
+    let calendlyValue = '';
 
     const now = new Date().toLocaleDateString('en-GB');
     discordFields.push({ name: 'Time', value: now, inline: true });
@@ -210,13 +234,14 @@ router.post('/webhook', async (req, res) => {
           break;
         case 'calendly':
           hasCalendly = true;
-          value = answer.url || 'Call Booked ✅';
-          if (isUQCalendarUrl(value)) bookedUQCalendar = true;
+          calendlyValue = answer.url || 'Call Booked ✅';
+          if (isUQCalendarUrl(calendlyValue)) bookedUQCalendar = true;
           break;
         case 'url':
           value = answer.url || '';
           if (value.includes('calendly.com') && value.includes('invitees')) {
             hasCalendly = true;
+            calendlyValue = value;
             if (isUQCalendarUrl(value)) bookedUQCalendar = true;
           }
           break;
@@ -224,6 +249,7 @@ router.post('/webhook', async (req, res) => {
           value = answer.url || answer.text || answer.email || '';
           if (value && value.includes('calendly.com') && value.includes('invitees')) {
             hasCalendly = true;
+            calendlyValue = value;
             if (isUQCalendarUrl(value)) bookedUQCalendar = true;
           }
       }
@@ -233,7 +259,7 @@ router.post('/webhook', async (req, res) => {
       if (titleLower.includes('last name')) lastName = value;
       if (titleLower.includes('how did you hear')) source = value;
 
-      // Income check — £35k+ triggers PREMIUM QUALIFIED immediately
+      // Income check — £35k+ triggers PREMIUM QUALIFIED
       if (titleLower.includes('earning per year') || titleLower.includes('currently earning')) {
         const valueLower = value.toLowerCase();
         if (
@@ -271,7 +297,7 @@ router.post('/webhook', async (req, res) => {
         }
       }
 
-      // Show booking link in Discord
+      // Show booking link in Discord but skip from regular fields
       if (fieldTitle === 'UQ Calendar Booking' || fieldTitle === 'Main Calendar Booking') {
         if (value && value.includes('calendly.com')) {
           discordFields.push({
@@ -309,10 +335,7 @@ router.post('/webhook', async (req, res) => {
       );
     }
 
-    // Colour coding:
-    // PREMIUM QUALIFIED = income £35k+ OR (investment yes + credit 600+) — NOT UQ calendar
-    // QUALIFIED = investment yes + credit 600+
-    // UNQUALIFIED = everything else
+    // Colour coding
     const isPremiumQualified = (hasHighIncome || isPremiumLead) && !bookedUQCalendar;
     const monetaryValue = isPremiumQualified ? 3500 : isQualified ? 1997 : 0;
     const opportunitySource = isPremiumQualified ? 'premium-qualified' : isQualified ? 'qualified' : 'unqualified';
@@ -328,9 +351,19 @@ router.post('/webhook', async (req, res) => {
       tags: ['typeform-lead'],
     });
 
+    // Build GHL contact link
+    const fullName = `${firstName} ${lastName}`.trim() || email;
+    if (contact?.id) {
+      const ghlLink = getContactGHLLink(contact.id);
+      const linkedName = `[${fullName}](${ghlLink})`;
+      discordFields.splice(1, 0, { name: 'Contact', value: linkedName, inline: true });
+    }
+
     if (hasCalendly) {
-      // Full form with booking — move opportunity
       if (contact?.id) {
+        // Tag as typeform-booked so GHL workflow skips this contact
+        await updateGHLContactTags(contact.id, ['typeform-lead', 'typeform-booked']);
+
         const existing = await findAndUpdateOpportunityStage(
           contact.id,
           process.env.GHL_PIPELINE_BOOKED_STAGE_ID
@@ -345,7 +378,15 @@ router.post('/webhook', async (req, res) => {
         }
       }
 
-      // Always send call booked regardless of dedup
+      // Add booking link to Discord fields
+      if (calendlyValue && !discordFields.find(f => f.name === 'Call Booking')) {
+        discordFields.push({
+          name: 'Call Booking',
+          value: String(calendlyValue).substring(0, 1024),
+          inline: true
+        });
+      }
+
       let color, title;
       if (isPremiumQualified) {
         color = COLORS.GOLD;
@@ -362,13 +403,7 @@ router.post('/webhook', async (req, res) => {
       await sendSlackMessage(process.env.SLACK_WEBHOOK_BOOKED_CALLS, embed);
 
     } else {
-      // Partial submission — send new lead
-      // Key fix: always send if hasHighIncome (over £35k) even without investment answer
-      // Use dedup to prevent spam but NOT to block qualified leads
-      const isPartialQualified = hasHighIncome || isQualified || isPremiumQualified;
-
       if (!isDuplicateEmail(email)) {
-        // Create opportunity for ALL leads
         if (contact?.id) {
           await createGHLOpportunity(
             contact,
@@ -386,7 +421,6 @@ router.post('/webhook', async (req, res) => {
           color = COLORS.GREEN;
           title = '🟢 New Lead Optin - QUALIFIED';
         } else if (hasHighIncome) {
-          // Partial — income over £35k but no investment answer yet
           color = COLORS.GOLD;
           title = '🥇 New Lead Optin - PREMIUM QUALIFIED';
         } else {
