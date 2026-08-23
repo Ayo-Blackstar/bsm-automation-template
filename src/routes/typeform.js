@@ -26,6 +26,7 @@ function isDuplicateEmail(email) {
 
 function abbreviateTitle(title) {
   const map = {
+    'are you a permanent resident of the europe or us': 'Permanent Resident?',
     'are you a permanent resident of the uk or us': 'Permanent Resident?',
     'what industry do you currently work in': 'Industry',
     'what is your current job title or role': 'Current Job',
@@ -85,11 +86,11 @@ async function createGHLContact(contactData) {
   }
 }
 
-async function updateGHLContactTags(contactId, tags) {
+async function updateGHLContact(contactId, data) {
   try {
     await axios.put(
       `https://services.leadconnectorhq.com/contacts/${contactId}`,
-      { tags },
+      data,
       {
         headers: {
           'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
@@ -98,9 +99,9 @@ async function updateGHLContactTags(contactId, tags) {
         }
       }
     );
-    console.log('GHL contact tags updated:', tags);
+    console.log('GHL contact updated:', contactId);
   } catch (err) {
-    console.error('GHL tag update error:', err.response?.status, JSON.stringify(err.response?.data));
+    console.error('GHL contact update error:', err.response?.status, JSON.stringify(err.response?.data));
   }
 }
 
@@ -236,13 +237,14 @@ router.post('/webhook', async (req, res) => {
           hasCalendly = true;
           calendlyValue = answer.url || 'Call Booked ✅';
           if (isUQCalendarUrl(calendlyValue)) bookedUQCalendar = true;
-          break;
+          return;
         case 'url':
           value = answer.url || '';
           if (value.includes('calendly.com') && value.includes('invitees')) {
             hasCalendly = true;
             calendlyValue = value;
             if (isUQCalendarUrl(value)) bookedUQCalendar = true;
+            return;
           }
           break;
         default:
@@ -251,6 +253,7 @@ router.post('/webhook', async (req, res) => {
             hasCalendly = true;
             calendlyValue = value;
             if (isUQCalendarUrl(value)) bookedUQCalendar = true;
+            return;
           }
       }
 
@@ -321,7 +324,7 @@ router.post('/webhook', async (req, res) => {
     // Add UTM data
     if (hidden && Object.keys(hidden).length > 0) {
       const utmLines = Object.entries(hidden)
-        .filter(([k, v]) => v)
+        .filter(([k, v]) => v && v.trim())
         .map(([k, v]) => `**${k}:** ${v}`)
         .join('\n');
       if (utmLines) {
@@ -361,8 +364,15 @@ router.post('/webhook', async (req, res) => {
 
     if (hasCalendly) {
       if (contact?.id) {
-        // Tag as typeform-booked so GHL workflow skips this contact
-        await updateGHLContactTags(contact.id, ['typeform-lead', 'typeform-booked']);
+        // Update contact with typeform-booked tag AND phone number
+        // (in case partial fired first without phone)
+        const updateData = {
+          tags: ['typeform-lead', 'typeform-booked'],
+        };
+        if (phone) updateData.phone = phone;
+        if (firstName) updateData.firstName = firstName;
+        if (lastName) updateData.lastName = lastName;
+        await updateGHLContact(contact.id, updateData);
 
         const existing = await findAndUpdateOpportunityStage(
           contact.id,
@@ -403,8 +413,13 @@ router.post('/webhook', async (req, res) => {
       await sendSlackMessage(process.env.SLACK_WEBHOOK_BOOKED_CALLS, embed);
 
     } else {
+      // Partial submission — send new lead
       if (!isDuplicateEmail(email)) {
         if (contact?.id) {
+          // Update phone on partial too in case it came through
+          if (phone) {
+            await updateGHLContact(contact.id, { phone });
+          }
           await createGHLOpportunity(
             contact,
             process.env.GHL_PIPELINE_STAGE_ID,
