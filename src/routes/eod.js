@@ -10,7 +10,7 @@ function getEmbedConfig(formTitle) {
   } else if (title.includes('setter') && title.includes('manager')) {
     return { emoji: '💼', label: 'Sales / Setter Manager EOD', color: COLORS.GOLD, channel: 'daily_reports' };
   } else if (title.includes('setter')) {
-    return { emoji: '📋', label: 'Setter EOD', color: COLORS.GREEN, channel: 'setter_notes' };
+    return { emoji: '📋', label: 'Setter EOD', color: COLORS.GREEN, channel: 'daily_reports' };
   } else if (title.includes('company')) {
     return { emoji: '🏢', label: 'Company-wide EOD', color: COLORS.PURPLE, channel: 'daily_reports' };
   } else if (title.includes('advertis') || title.includes('ad report') || title.includes('ads')) {
@@ -63,7 +63,7 @@ router.post('/webhook', async (req, res) => {
     const webhookUrl = getWebhookUrl(config.channel);
     await sendDiscordMessage(webhookUrl, embed);
 
-    // Also send daily reports to Slack
+    // Send daily reports to Slack too
     if (config.channel === 'daily_reports') {
       await sendSlackMessage(process.env.SLACK_WEBHOOK_DAILY_REPORTS, embed);
     }
