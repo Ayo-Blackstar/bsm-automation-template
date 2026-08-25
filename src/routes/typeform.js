@@ -180,6 +180,45 @@ async function findAndUpdateOpportunityStage(contactId, stageId) {
   }
 }
 
+async function addGHLOpportunityNote(contactId, noteText) {
+  try {
+    const headers = {
+      'Authorization': `Bearer ${process.env.GHL_API_KEY}`,
+      'Content-Type': 'application/json',
+      'Version': '2021-07-28'
+    };
+
+    // Add to contact notes
+    await axios.post(
+      `https://services.leadconnectorhq.com/contacts/${contactId}/notes`,
+      { body: noteText },
+      { headers }
+    );
+
+    // Find opportunity and add note there too
+    const oppResponse = await axios.get(
+      `https://services.leadconnectorhq.com/opportunities/search?location_id=${process.env.GHL_LOCATION_ID}&contact_id=${contactId}`,
+      { headers }
+    );
+    const opportunities = oppResponse.data?.opportunities || [];
+    const pipelineId = process.env.GHL_PIPELINE_ID;
+    const opportunity = pipelineId
+      ? opportunities.find(o => o.pipelineId === pipelineId)
+      : opportunities[0];
+
+    if (opportunity) {
+      await axios.post(
+        `https://services.leadconnectorhq.com/opportunities/${opportunity.id}/notes`,
+        { body: noteText },
+        { headers }
+      );
+      console.log('Opportunity note added for:', opportunity.id);
+    }
+  } catch (err) {
+    console.error('GHL note error:', err.response?.data || err.message);
+  }
+}
+
 router.post('/webhook', async (req, res) => {
   try {
     const payload = req.body;
@@ -199,6 +238,9 @@ router.post('/webhook', async (req, res) => {
     let email = '';
     let source = '';
     let calendlyValue = '';
+
+    // Build note lines for GHL
+    const noteLines = ['📋 Typeform Application:\n'];
 
     const now = new Date().toLocaleDateString('en-GB');
     discordFields.push({ name: 'Time', value: now, inline: true });
@@ -300,7 +342,12 @@ router.post('/webhook', async (req, res) => {
         }
       }
 
-      // Show booking link in Discord but skip from regular fields
+      // Add to note lines
+      if (value && fieldTitle !== 'UQ Calendar Booking' && fieldTitle !== 'Main Calendar Booking') {
+        noteLines.push(`${fieldTitle}: ${value}`);
+      }
+
+      // Show booking link in Discord
       if (fieldTitle === 'UQ Calendar Booking' || fieldTitle === 'Main Calendar Booking') {
         if (value && value.includes('calendly.com')) {
           discordFields.push({
@@ -329,6 +376,7 @@ router.post('/webhook', async (req, res) => {
         .join('\n');
       if (utmLines) {
         discordFields.push({ name: 'ATTRIBUTION', value: utmLines, inline: false });
+        noteLines.push(`\nUTM Attribution:\n${Object.entries(hidden).filter(([k,v]) => v).map(([k,v]) => `${k}: ${v}`).join('\n')}`);
       }
     }
 
@@ -338,10 +386,15 @@ router.post('/webhook', async (req, res) => {
       );
     }
 
-    // Colour coding
-    const isPremiumQualified = (hasHighIncome || isPremiumLead) && !bookedUQCalendar;
+    // Colour coding:
+    // 🥇 PREMIUM QUALIFIED = income £35k+ only
+    // 📞 UNQUALIFIED = everything else
+    const isPremiumQualified = hasHighIncome && !bookedUQCalendar;
     const monetaryValue = isPremiumQualified ? 3500 : isQualified ? 1997 : 0;
     const opportunitySource = isPremiumQualified ? 'premium-qualified' : isQualified ? 'qualified' : 'unqualified';
+
+    // Build note text
+    const noteText = noteLines.join('\n');
 
     // Always create GHL contact for ALL leads
     const contact = await createGHLContact({
@@ -364,11 +417,8 @@ router.post('/webhook', async (req, res) => {
 
     if (hasCalendly) {
       if (contact?.id) {
-        // Update contact with typeform-booked tag AND phone number
-        // (in case partial fired first without phone)
-        const updateData = {
-          tags: ['typeform-lead', 'typeform-booked'],
-        };
+        // Update contact with typeform-booked tag AND phone
+        const updateData = { tags: ['typeform-lead', 'typeform-booked'] };
         if (phone) updateData.phone = phone;
         if (firstName) updateData.firstName = firstName;
         if (lastName) updateData.lastName = lastName;
@@ -386,9 +436,12 @@ router.post('/webhook', async (req, res) => {
             opportunitySource
           );
         }
+
+        // Add form answers as note to GHL
+        await addGHLOpportunityNote(contact.id, noteText);
       }
 
-      // Add booking link to Discord fields
+      // Add booking link to Discord
       if (calendlyValue && !discordFields.find(f => f.name === 'Call Booking')) {
         discordFields.push({
           name: 'Call Booking',
@@ -401,9 +454,6 @@ router.post('/webhook', async (req, res) => {
       if (isPremiumQualified) {
         color = COLORS.GOLD;
         title = '🥇 New Call Booked - PREMIUM QUALIFIED';
-      } else if (isQualified) {
-        color = COLORS.GREEN;
-        title = '🟢 New Call Booked - QUALIFIED';
       } else {
         color = COLORS.BLUE;
         title = '📞 New Call Booked - UNQUALIFIED';
@@ -413,28 +463,25 @@ router.post('/webhook', async (req, res) => {
       await sendSlackMessage(process.env.SLACK_WEBHOOK_BOOKED_CALLS, embed);
 
     } else {
-      // Partial submission — send new lead
       if (!isDuplicateEmail(email)) {
         if (contact?.id) {
-          // Update phone on partial too in case it came through
-          if (phone) {
-            await updateGHLContact(contact.id, { phone });
-          }
+          if (phone) await updateGHLContact(contact.id, { phone });
+
           await createGHLOpportunity(
             contact,
             process.env.GHL_PIPELINE_STAGE_ID,
             monetaryValue,
             opportunitySource
           );
+
+          // Add form answers as note to GHL
+          await addGHLOpportunityNote(contact.id, noteText);
         }
 
         let color, title;
         if (isPremiumQualified) {
           color = COLORS.GOLD;
           title = '🥇 New Lead Optin - PREMIUM QUALIFIED';
-        } else if (isQualified) {
-          color = COLORS.GREEN;
-          title = '🟢 New Lead Optin - QUALIFIED';
         } else if (hasHighIncome) {
           color = COLORS.GOLD;
           title = '🥇 New Lead Optin - PREMIUM QUALIFIED';
