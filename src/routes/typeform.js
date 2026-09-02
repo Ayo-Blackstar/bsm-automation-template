@@ -109,9 +109,7 @@ async function createGHLOpportunity(contact, stageId, monetaryValue, source) {
   try {
     const pipelineId = process.env.GHL_PIPELINE_ID;
     if (!pipelineId || !stageId || !contact?.id) return null;
-
     const name = `${contact.firstName || ''} ${contact.lastName || ''}`.trim() || contact.email || 'New Lead';
-
     const response = await axios.post(
       'https://services.leadconnectorhq.com/opportunities/',
       {
@@ -144,7 +142,6 @@ async function findAndUpdateOpportunityStage(contactId, stageId) {
   try {
     const pipelineId = process.env.GHL_PIPELINE_ID;
     if (!pipelineId || !stageId || !contactId) return null;
-
     const response = await axios.get(
       `https://services.leadconnectorhq.com/opportunities/search?location_id=${process.env.GHL_LOCATION_ID}&contact_id=${contactId}`,
       {
@@ -154,10 +151,8 @@ async function findAndUpdateOpportunityStage(contactId, stageId) {
         }
       }
     );
-
     const opportunities = response.data?.opportunities || [];
     const opportunity = opportunities.find(o => o.pipelineId === pipelineId);
-
     if (opportunity) {
       await axios.put(
         `https://services.leadconnectorhq.com/opportunities/${opportunity.id}`,
@@ -187,32 +182,24 @@ async function addGHLOpportunityNote(contactId, noteText) {
       'Content-Type': 'application/json',
       'Version': '2021-07-28'
     };
-
-    // Add to contact notes
     await axios.post(
       `https://services.leadconnectorhq.com/contacts/${contactId}/notes`,
       { body: noteText },
       { headers }
     );
-
-    // Find opportunity and add note there too
     const oppResponse = await axios.get(
       `https://services.leadconnectorhq.com/opportunities/search?location_id=${process.env.GHL_LOCATION_ID}&contact_id=${contactId}`,
       { headers }
     );
     const opportunities = oppResponse.data?.opportunities || [];
-    const pipelineId = process.env.GHL_PIPELINE_ID;
-    const opportunity = pipelineId
-      ? opportunities.find(o => o.pipelineId === pipelineId)
-      : opportunities[0];
-
+    const opportunity = opportunities.find(o => o.pipelineId === process.env.GHL_PIPELINE_ID) || opportunities[0];
     if (opportunity) {
-      await axios.post(
-        `https://services.leadconnectorhq.com/opportunities/${opportunity.id}/notes`,
-        { body: noteText },
+      await axios.put(
+        `https://services.leadconnectorhq.com/opportunities/${opportunity.id}`,
+        { notes: noteText },
         { headers }
       );
-      console.log('Opportunity note added for:', opportunity.id);
+      console.log('Opportunity notes updated:', opportunity.id);
     }
   } catch (err) {
     console.error('GHL note error:', err.response?.data || err.message);
@@ -238,9 +225,7 @@ router.post('/webhook', async (req, res) => {
     let email = '';
     let source = '';
     let calendlyValue = '';
-
-    // Build note lines for GHL
-    const noteLines = ['📋 Typeform Application:\n'];
+    const noteLines = ['📋 Meta Application:\n'];
 
     const now = new Date().toLocaleDateString('en-GB');
     discordFields.push({ name: 'Time', value: now, inline: true });
@@ -252,32 +237,16 @@ router.post('/webhook', async (req, res) => {
       let value = '';
 
       switch (answer.type) {
-        case 'text':
-          value = answer.text || '';
-          break;
-        case 'email':
-          value = answer.email || '';
-          email = value;
-          break;
-        case 'phone_number':
-          value = answer.phone_number || '';
-          phone = value;
-          break;
-        case 'choice':
-          value = answer.choice?.label || '';
-          break;
-        case 'choices':
-          value = answer.choices?.labels?.join(', ') || '';
-          break;
-        case 'boolean':
-          value = answer.boolean ? 'Yes' : 'No';
-          break;
-        case 'number':
-          value = String(answer.number) || '';
-          break;
+        case 'text': value = answer.text || ''; break;
+        case 'email': value = answer.email || ''; email = value; break;
+        case 'phone_number': value = answer.phone_number || ''; phone = value; break;
+        case 'choice': value = answer.choice?.label || ''; break;
+        case 'choices': value = answer.choices?.labels?.join(', ') || ''; break;
+        case 'boolean': value = answer.boolean ? 'Yes' : 'No'; break;
+        case 'number': value = String(answer.number) || ''; break;
         case 'calendly':
           hasCalendly = true;
-          calendlyValue = answer.url || 'Call Booked ✅';
+          calendlyValue = answer.url || '';
           if (isUQCalendarUrl(calendlyValue)) bookedUQCalendar = true;
           return;
         case 'url':
@@ -304,17 +273,13 @@ router.post('/webhook', async (req, res) => {
       if (titleLower.includes('last name')) lastName = value;
       if (titleLower.includes('how did you hear')) source = value;
 
-      // Income check — £35k+ triggers PREMIUM QUALIFIED
+      // Income check — £35k+ = PREMIUM QUALIFIED
       if (titleLower.includes('earning per year') || titleLower.includes('currently earning')) {
         const valueLower = value.toLowerCase();
         if (
-          valueLower.includes('35k') ||
-          valueLower.includes('45k') ||
-          valueLower.includes('60k') ||
-          valueLower.includes('over') ||
-          valueLower.includes('£35') ||
-          valueLower.includes('£45') ||
-          valueLower.includes('£60')
+          valueLower.includes('35k') || valueLower.includes('45k') ||
+          valueLower.includes('60k') || valueLower.includes('over') ||
+          valueLower.includes('£35') || valueLower.includes('£45') || valueLower.includes('£60')
         ) {
           hasHighIncome = true;
         }
@@ -332,34 +297,23 @@ router.post('/webhook', async (req, res) => {
       if (titleLower.includes('credit score') || titleLower.includes('experian')) {
         const scoreLower = value.toLowerCase();
         if (
-          scoreLower.includes('800') ||
-          scoreLower.includes('701') ||
-          scoreLower.includes('700') ||
-          scoreLower.includes('600 - 700') ||
+          scoreLower.includes('800') || scoreLower.includes('701') ||
+          scoreLower.includes('700') || scoreLower.includes('600 - 700') ||
           scoreLower.includes('600+')
         ) {
           if (isQualified) isPremiumLead = true;
         }
       }
 
-      // Add to note lines
-      if (value && fieldTitle !== 'UQ Calendar Booking' && fieldTitle !== 'Main Calendar Booking') {
-        noteLines.push(`${fieldTitle}: ${value}`);
-      }
-
-      // Show booking link in Discord
       if (fieldTitle === 'UQ Calendar Booking' || fieldTitle === 'Main Calendar Booking') {
         if (value && value.includes('calendly.com')) {
-          discordFields.push({
-            name: 'Call Booking',
-            value: String(value).substring(0, 1024),
-            inline: true
-          });
+          discordFields.push({ name: 'Call Booking', value: String(value).substring(0, 1024), inline: true });
         }
         return;
       }
 
       if (value) {
+        noteLines.push(`${fieldTitle}: ${value}`);
         discordFields.push({
           name: fieldTitle.substring(0, 256),
           value: String(value).substring(0, 1024),
@@ -368,15 +322,15 @@ router.post('/webhook', async (req, res) => {
       }
     });
 
-    // Add UTM data
+    // UTM data
     if (hidden && Object.keys(hidden).length > 0) {
       const utmLines = Object.entries(hidden)
-        .filter(([k, v]) => v && v.trim())
+        .filter(([k, v]) => v && v.trim() && v !== 'hidden_value')
         .map(([k, v]) => `**${k}:** ${v}`)
         .join('\n');
       if (utmLines) {
         discordFields.push({ name: 'ATTRIBUTION', value: utmLines, inline: false });
-        noteLines.push(`\nUTM Attribution:\n${Object.entries(hidden).filter(([k,v]) => v).map(([k,v]) => `${k}: ${v}`).join('\n')}`);
+        noteLines.push(`\nUTM:\n${utmLines}`);
       }
     }
 
@@ -387,16 +341,15 @@ router.post('/webhook', async (req, res) => {
     }
 
     // Colour coding:
-    // 🥇 PREMIUM QUALIFIED = income £35k+ only
+    // 🥇 PREMIUM QUALIFIED = income £35k+
+    // 🟢 QUALIFIED = investment Yes
     // 📞 UNQUALIFIED = everything else
     const isPremiumQualified = hasHighIncome && !bookedUQCalendar;
-    const monetaryValue = isPremiumQualified ? 3500 : isQualified ? 1997 : 0;
-    const opportunitySource = isPremiumQualified ? 'premium-qualified' : isQualified ? 'qualified' : 'unqualified';
-
-    // Build note text
+    const isQualifiedLead = isQualified && !bookedUQCalendar;
+    const monetaryValue = isPremiumQualified ? 3500 : isQualifiedLead ? 1997 : 0;
+    const opportunitySource = isPremiumQualified ? 'meta-premium' : isQualifiedLead ? 'meta-qualified' : 'meta';
     const noteText = noteLines.join('\n');
 
-    // Always create GHL contact for ALL leads
     const contact = await createGHLContact({
       firstName,
       lastName,
@@ -407,56 +360,41 @@ router.post('/webhook', async (req, res) => {
       tags: ['typeform-lead'],
     });
 
-    // Build GHL contact link
     const fullName = `${firstName} ${lastName}`.trim() || email;
     if (contact?.id) {
       const ghlLink = getContactGHLLink(contact.id);
-      const linkedName = `[${fullName}](${ghlLink})`;
-      discordFields.splice(1, 0, { name: 'Contact', value: linkedName, inline: true });
+      discordFields.splice(1, 0, { name: 'Contact', value: `[${fullName}](${ghlLink})`, inline: true });
     }
 
     if (hasCalendly) {
       if (contact?.id) {
-        // Update contact with typeform-booked tag AND phone
         const updateData = { tags: ['typeform-lead', 'typeform-booked'] };
         if (phone) updateData.phone = phone;
         if (firstName) updateData.firstName = firstName;
         if (lastName) updateData.lastName = lastName;
         await updateGHLContact(contact.id, updateData);
 
-        const existing = await findAndUpdateOpportunityStage(
-          contact.id,
-          process.env.GHL_PIPELINE_BOOKED_STAGE_ID
-        );
+        const existing = await findAndUpdateOpportunityStage(contact.id, process.env.GHL_PIPELINE_BOOKED_STAGE_ID);
         if (!existing) {
-          await createGHLOpportunity(
-            contact,
-            process.env.GHL_PIPELINE_BOOKED_STAGE_ID,
-            monetaryValue,
-            opportunitySource
-          );
+          await createGHLOpportunity(contact, process.env.GHL_PIPELINE_BOOKED_STAGE_ID, monetaryValue, opportunitySource);
         }
-
-        // Add form answers as note to GHL
         await addGHLOpportunityNote(contact.id, noteText);
       }
 
-      // Add booking link to Discord
       if (calendlyValue && !discordFields.find(f => f.name === 'Call Booking')) {
-        discordFields.push({
-          name: 'Call Booking',
-          value: String(calendlyValue).substring(0, 1024),
-          inline: true
-        });
+        discordFields.push({ name: 'Call Booking', value: String(calendlyValue).substring(0, 1024), inline: true });
       }
 
       let color, title;
       if (isPremiumQualified) {
         color = COLORS.GOLD;
-        title = '🥇 New Call Booked - PREMIUM QUALIFIED';
+        title = '🥇 Meta Call Booked - PREMIUM QUALIFIED';
+      } else if (isQualifiedLead) {
+        color = COLORS.GREEN;
+        title = '🟢 Meta Call Booked - QUALIFIED';
       } else {
         color = COLORS.BLUE;
-        title = '📞 New Call Booked - UNQUALIFIED';
+        title = '📞 Meta Call Booked - UNQUALIFIED';
       }
       const embed = createEmbed(title, discordFields, color);
       await sendDiscordMessage(process.env.DISCORD_WEBHOOK_BOOKED_CALLS, embed);
@@ -466,28 +404,20 @@ router.post('/webhook', async (req, res) => {
       if (!isDuplicateEmail(email)) {
         if (contact?.id) {
           if (phone) await updateGHLContact(contact.id, { phone });
-
-          await createGHLOpportunity(
-            contact,
-            process.env.GHL_PIPELINE_STAGE_ID,
-            monetaryValue,
-            opportunitySource
-          );
-
-          // Add form answers as note to GHL
+          await createGHLOpportunity(contact, process.env.GHL_PIPELINE_STAGE_ID, monetaryValue, opportunitySource);
           await addGHLOpportunityNote(contact.id, noteText);
         }
 
         let color, title;
         if (isPremiumQualified) {
           color = COLORS.GOLD;
-          title = '🥇 New Lead Optin - PREMIUM QUALIFIED';
-        } else if (hasHighIncome) {
-          color = COLORS.GOLD;
-          title = '🥇 New Lead Optin - PREMIUM QUALIFIED';
+          title = '🥇 Meta Lead Optin - PREMIUM QUALIFIED';
+        } else if (isQualifiedLead) {
+          color = COLORS.GREEN;
+          title = '🟢 Meta Lead Optin - QUALIFIED';
         } else {
           color = COLORS.BLUE;
-          title = '📞 New Lead Optin - UNQUALIFIED';
+          title = '📞 Meta Lead Optin - UNQUALIFIED';
         }
 
         const embed = createEmbed(title, discordFields, color);
